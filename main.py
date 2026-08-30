@@ -27,6 +27,17 @@ prediction_id = save_prediction(
 
 # 2. Periyodik olarak süresi dolan tahminleri doğrulama örneği:
 # (get_spot_price sizin borsadan anlık fiyat çeken fonksiyonunuz olmalıdır)
+def get_spot_price(symbol: str) -> float:
+    """Binance kamuya açık REST API'si üzerinden anlık USDT fiyatını çeker."""
+    try:
+        formatted_symbol = f"{symbol.upper()}USDT"
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={formatted_symbol}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return float(response.json()["price"])
+    except Exception as e:
+        print(f"[{symbol}] Fiyat çekme hatası: {e}")
+    return None
 check_and_update_outcomes(get_spot_price)
 # ---------------------------------------------------------
 # DISK DOLMASINI VE VERITABANI KILITLENMESINI ENGELLEYEN AYAR
