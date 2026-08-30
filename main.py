@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import tool
-
+# CI/CD Otomatik Yayımlama Testi
 # ---------------------------------------------------------
 # DISK DOLMASINI VE VERITABANI KILITLENMESINI ENGELLEYEN AYAR
 # ---------------------------------------------------------
