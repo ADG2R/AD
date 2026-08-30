@@ -5,7 +5,8 @@ DB_PATH = "predictions.db"
 
 def init_db():
     """Veritabanı tablolarını ve indeksleri otomatik oluşturur."""
-    with sqlite3.connect(DB_PATH) as conn:
+    conn = sqlite3.connect(DB_PATH)
+    try:
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
@@ -35,11 +36,14 @@ def init_db():
             );
         """)
         conn.commit()
+    finally:
+        conn.close()
 
 def save_prediction(symbol: str, direction: str, entry: float, target: float, stop: float, timeframe_hours: int, confidence: float, rationale: str) -> int:
     """Ajanın ürettiği yeni tahmini kaydeder."""
     target_date = datetime.utcnow() + timedelta(hours=timeframe_hours)
-    with sqlite3.connect(DB_PATH) as conn:
+    conn = sqlite3.connect(DB_PATH)
+    try:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO predictions 
@@ -48,13 +52,15 @@ def save_prediction(symbol: str, direction: str, entry: float, target: float, st
         """, (symbol, direction.upper(), entry, target, stop, timeframe_hours, confidence, rationale, target_date))
         conn.commit()
         return cursor.lastrowid
+    finally:
+        conn.close()
 
 def check_and_update_outcomes(get_current_price_func):
     """Süresi dolmuş tahminleri güncel piyasa fiyatı ile karşılaştırıp doğrular."""
     now = datetime.utcnow()
-    with sqlite3.connect(DB_PATH) as conn:
+    conn = sqlite3.connect(DB_PATH)
+    try:
         cursor = conn.cursor()
-        # Vadesi dolmuş ve henüz sonuçlanmamış tahminleri getir
         cursor.execute("""
             SELECT id, symbol, predicted_direction, entry_price, target_price 
             FROM predictions 
@@ -67,7 +73,6 @@ def check_and_update_outcomes(get_current_price_func):
             if not actual_price:
                 continue
 
-            # Başarı şartı kontrolü
             if direction == 'BULLISH':
                 is_hit = actual_price >= target_price if target_price else actual_price > entry_price
             elif direction == 'BEARISH':
@@ -84,3 +89,5 @@ def check_and_update_outcomes(get_current_price_func):
 
             cursor.execute("UPDATE predictions SET status = 'COMPLETED' WHERE id = ?", (pred_id,))
         conn.commit()
+    finally:
+        conn.close()
