@@ -1,47 +1,16 @@
 import os
+import re
 import time
+import json
 import requests
 import schedule
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import tool
-# main.py dosyasının en üstüne ekleyin
-from db_manager import init_db, save_prediction, check_and_update_outcomes
+from db_manager import init_db, save_prediction, check_and_update_outcomes, format_performance_report
 
-# Bot başladığında veritabanını ilklendirin
-init_db()
-
-# 1. DeepSeek çıktısından gelen verileri kaydetme örneği:
-# DeepSeek'ten dönen JSON veya ayrıştırılmış veriyi veritabanına yazın:
-prediction_id = save_prediction(
-    symbol="PENDLE",
-    direction="BULLISH",
-    entry=5.20,
-    target=6.10,
-    stop=4.80,
-    timeframe_hours=24,
-    confidence=0.85,
-    rationale="TVL artışı ve RSI pozitif uyumsuzluk."
-)
-
-# 2. Periyodik olarak süresi dolan tahminleri doğrulama örneği:
-# (get_spot_price sizin borsadan anlık fiyat çeken fonksiyonunuz olmalıdır)
-def get_spot_price(symbol: str) -> float:
-    """Binance kamuya açık REST API'si üzerinden anlık USDT fiyatını çeker."""
-    try:
-        formatted_symbol = f"{symbol.upper()}USDT"
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={formatted_symbol}"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            return float(response.json()["price"])
-    except Exception as e:
-        print(f"[{symbol}] Fiyat çekme hatası: {e}")
-    return None
-check_and_update_outcomes(get_spot_price)
-# ---------------------------------------------------------
-# DISK DOLMASINI VE VERITABANI KILITLENMESINI ENGELLEYEN AYAR
-# ---------------------------------------------------------
+# System ve Telemetri Ayarları
 os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "true"
 
 # .env ortam değişkenlerini yükle
@@ -71,15 +40,50 @@ llm = LLM(
 )
 
 # ---------------------------------------------------------
+# SPOT FİYAT VE VERİTABANI YARDIMCI FONKSİYONLARI
+# ---------------------------------------------------------
+
+def get_spot_price(symbol: str) -> float:
+    """Binance kamuya açık REST API'si üzerinden anlık USDT fiyatını çeker."""
+    try:
+        formatted_symbol = f"{symbol.upper()}USDT"
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={formatted_symbol}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return float(response.json()["price"])
+    except Exception as e:
+        print(f"[{symbol}] Fiyat çekme hatası: {e}")
+    return None
+
+def parse_and_save_predictions(text: str):
+    """LLM yanıtı içerisindeki JSON tahmin bloğunu ayıklar ve SQLite'a kaydeder."""
+    try:
+        match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+        if match:
+            json_str = match.group(1).strip()
+            predictions_data = json.loads(json_str)
+            for item in predictions_data:
+                save_prediction(
+                    symbol=item["symbol"],
+                    direction=item["direction"],
+                    entry=float(item["entry_price"]),
+                    target=float(item["target_price"]),
+                    stop=float(item["stop_loss"]),
+                    timeframe_hours=int(item.get("timeframe_hours", 24)),
+                    confidence=float(item.get("confidence_score", 0.8)),
+                    rationale=item.get("rationale", "")
+                )
+            print("✅ [DEBUG] Tahminler SQLite veritabanına başarıyla kaydedildi.")
+    except Exception as e:
+        print(f"⚠️ [DEBUG] Tahmin verisi ayrıştırma/kaydetme hatası: {e}")
+
+# ---------------------------------------------------------
 # DİNAMİK CANLI BİLGİ VE WEB3 CÜZDAN ARAÇLARI (TOOLS)
 # ---------------------------------------------------------
 
 @tool("Web3 EVM Cüzdan Bakiye Sorgula")
 def get_wallet_balance(wallet_address: str = "") -> str:
-    """
-    EVM cüzdan adresinin anlık ETH bakiyesini ve USD karşılığını sorgular.
-    Parametre verilmezse .env dosyasında tanımlı WALLET_ADDRESS değerini kullanır.
-    """
+    """EVM cüzdan adresinin anlık ETH bakiyesini ve USD karşılığını sorgular."""
     target_address = wallet_address.strip() if wallet_address.strip() else WALLET_ADDRESS
     if not target_address:
         return "⚠️ Sorgulanacak cüzdan adresi bulunamadı (.env dosyasına WALLET_ADDRESS ekleyin)."
@@ -159,7 +163,6 @@ def get_crypto_price_and_info(symbol: str) -> str:
     now_str = get_current_tr_time()
     print(f"🔍 [DEBUG - {now_str}] '{clean_sym}' için borsa sorgusu atılıyor...")
 
-    # 1. Bybit V5
     try:
         url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={clean_sym}USDT"
         res = requests.get(url, headers=HEADERS, timeout=6)
@@ -176,7 +179,6 @@ def get_crypto_price_and_info(symbol: str) -> str:
     except Exception:
         pass
 
-    # 2. MEXC Yedek
     try:
         url = f"https://api.mexc.com/api/v3/ticker/24hr?symbol={clean_sym}USDT"
         res = requests.get(url, headers=HEADERS, timeout=6)
@@ -203,11 +205,25 @@ def send_telegram_report(message: str):
         return
         
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    
+    # Rapor altındaki ham JSON bloğunu Telegram mesajından temizle (isteğe bağlı)
+    clean_msg = re.sub(r"```json\s*.*?```", "", message, flags=re.DOTALL).strip()
+    
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": clean_msg, "parse_mode": "Markdown"}
     try:
         res = requests.post(url, json=payload, timeout=10)
         res.raise_for_status()
         print("✅ [DEBUG] Telegram bildirimi başarıyla gönderildi.")
+    except requests.exceptions.HTTPError:
+        # Markdown ayrıştırma hatası (HTTP 400) durumunda düz metin (plain text) olarak gönder
+        print("⚠️ [DEBUG] Markdown biçimlendirme hatası alındı, düz metin olarak tekrar deneniyor...")
+        payload["parse_mode"] = None
+        try:
+            res = requests.post(url, json=payload, timeout=10)
+            res.raise_for_status()
+            print("✅ [DEBUG] Telegram bildirimi düz metin olarak başarıyla gönderildi.")
+        except Exception as e:
+            print(f"❌ [DEBUG] Telegram gönderme hatası: {e}")
     except Exception as e:
         print(f"❌ [DEBUG] Telegram gönderme hatası: {e}")
 
@@ -219,14 +235,19 @@ def run_agent_job():
     current_time_str = get_current_tr_time()
     print(f"\n🚀 [DEBUG] Otonom AI Ajan Analiz Sürecini Başlatıyor ({current_time_str} TRT)")
 
+    # 1. Vadesi dolmuş geçmiş tahminleri canlı fiyatlarla güncelle
+    check_and_update_outcomes(get_spot_price)
+
+    # 2. Geçmiş win-rate performans özetini al
+    perf_report = format_performance_report()
+
     crypto_analyst = Agent(
         role="Otonom Portföy ve Piyasa Analisti",
-        goal="Cüzdan bakiyesini kontrol etmek, piyasayı tarayıp fırsatları bağımsız keşfetmek ve bakiyeye uygun rasyonel analiz sunmak.",
+        goal="Cüzdan bakiyesini kontrol etmek, piyasayı tarayıp fırsatları bağımsız keşfetmek ve veritabanı için teknik tahmin üretmek.",
         backstory=f"""Sen portföy bilincine sahip otonom bir finansal ajansın.
         Şu anki KESİN Türkiye Saati: {current_time_str}.
-        Her analizin başında mutlaka 'get_wallet_balance' aracını kullanarak cüzdan bakiyesini ve USD değerini kontrol edersin.
-        Ardından 'discover_market_projects' ve 'get_crypto_price_and_info' araçlarıyla piyasa fırsatlarını incelersin.
-        Asla geçmiş hafızandaki uydurma verileri veya tarihleri kullanmazsın.""",
+        Her analizin başında mutlaka 'get_wallet_balance' aracını kullanarak cüzdan bakiyesini kontrol edersin.
+        'discover_market_projects' ve 'get_crypto_price_and_info' araçlarıyla piyasa fırsatlarını incelersin.""",
         tools=[get_wallet_balance, discover_market_projects, get_crypto_price_and_info],
         llm=llm,
         verbose=True
@@ -242,9 +263,25 @@ def run_agent_job():
         3. Taramadan 2 veya 3 projeyi KENDİN seçip 'get_crypto_price_and_info' ile canlı verilerini al.
         4. Raporun EN ÜSTÜNE şu başlığı ekle:
            "📊 **Otonom Portföy & Piyasa Raporu** ({current_time_str})"
-        5. Cüzdan bakiyeni de rapora dahil ederek, seçtiğin projeler için Türkçe Telegram raporu oluştur.
+        5. Cüzdan bakiyesi ve seçtiğin projeler için Türkçe Telegram raporu oluştur.
+        6. RAPORUN EN ALTINA, veritabanına otomatik kaydolması için seçtiğin projelerle ilgili tahminleri AYNEN şu JSON formatında yaz (başka metin ekleme):
+
+        ```json
+        [
+          {{
+            "symbol": "COIN_ADI",
+            "direction": "BULLISH",
+            "entry_price": 5.20,
+            "target_price": 6.10,
+            "stop_loss": 4.80,
+            "timeframe_hours": 24,
+            "confidence_score": 0.85,
+            "rationale": "TVL artışı ve RSI pozitif uyumsuzluk."
+          }}
+        ]
+        ```
         """,
-        expected_output="Cüzdan bakiyesi ve canlı piyasa keşfine dayalı Türkçe Telegram kripto raporu.",
+        expected_output="Cüzdan bakiyesi, canlı piyasa analizi ve en altta JSON formatında tahmin bloğu içeren Türkçe Telegram raporu.",
         agent=crypto_analyst
     )
 
@@ -256,16 +293,29 @@ def run_agent_job():
 
     try:
         result = crew.kickoff()
-        send_telegram_report(str(result))
+        output_text = str(result)
+        
+        # JSON tahminleri veritabanına kaydet
+        parse_and_save_predictions(output_text)
+        
+        # Telegram'a raporu gönder
+        send_telegram_report(output_text)
     except Exception as e:
         error_msg = f"❌ Ajan çalışma hatası: {e}"
         print(error_msg)
         send_telegram_report(error_msg)
 
 if __name__ == "__main__":
+    # Uygulama başında SQLite tablolarını ilklendir
+    init_db()
+
+    # İlk analizi başlat
     run_agent_job()
+    
+    # Her 4 saatte bir periyodik çalıştırma zamanlaması
     schedule.every(4).hours.do(run_agent_job)
     print("🚀 Kripto Bot Servisi 7/24 Aktif Konumda Çalışıyor...")
+    
     while True:
         schedule.run_pending()
         time.sleep(30)
