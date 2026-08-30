@@ -6,7 +6,28 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import tool
-# CI/CD Otomatik Yayımlama Testi
+# main.py dosyasının en üstüne ekleyin
+from db_manager import init_db, save_prediction, check_and_update_outcomes
+
+# Bot başladığında veritabanını ilklendirin
+init_db()
+
+# 1. DeepSeek çıktısından gelen verileri kaydetme örneği:
+# DeepSeek'ten dönen JSON veya ayrıştırılmış veriyi veritabanına yazın:
+prediction_id = save_prediction(
+    symbol="PENDLE",
+    direction="BULLISH",
+    entry=5.20,
+    target=6.10,
+    stop=4.80,
+    timeframe_hours=24,
+    confidence=0.85,
+    rationale="TVL artışı ve RSI pozitif uyumsuzluk."
+)
+
+# 2. Periyodik olarak süresi dolan tahminleri doğrulama örneği:
+# (get_spot_price sizin borsadan anlık fiyat çeken fonksiyonunuz olmalıdır)
+check_and_update_outcomes(get_spot_price)
 # ---------------------------------------------------------
 # DISK DOLMASINI VE VERITABANI KILITLENMESINI ENGELLEYEN AYAR
 # ---------------------------------------------------------
