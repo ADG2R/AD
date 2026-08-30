@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 DB_PATH = "predictions.db"
 
 def init_db():
-    """Veritabanı tablolarını ve indeksleri otomatik oluşturur."""
+    """Veritabanı tablolarını ve indeksleri ilklendirir."""
     conn = sqlite3.connect(DB_PATH)
     try:
         cursor = conn.cursor()
@@ -91,3 +91,57 @@ def check_and_update_outcomes(get_current_price_func):
         conn.commit()
     finally:
         conn.close()
+
+def get_performance_summary():
+    """Tamamlanan tahminlerin genel ve coin bazlı başarı oranlarını getirir."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                COUNT(p.id) AS total,
+                COALESCE(SUM(CASE WHEN o.is_hit = 1 THEN 1 ELSE 0 END), 0) AS hits,
+                COALESCE(ROUND(AVG(o.is_hit) * 100, 2), 0.0) AS win_rate,
+                COALESCE(ROUND(AVG(o.price_change_pct), 2), 0.0) AS avg_change
+            FROM predictions p
+            JOIN outcomes o ON p.id = o.prediction_id
+            WHERE p.status = 'COMPLETED'
+        """)
+        overall = cursor.fetchone()
+
+        cursor.execute("""
+            SELECT 
+                p.symbol,
+                COUNT(p.id) AS total,
+                COALESCE(SUM(CASE WHEN o.is_hit = 1 THEN 1 ELSE 0 END), 0) AS hits,
+                COALESCE(ROUND(AVG(o.is_hit) * 100, 2), 0.0) AS win_rate,
+                COALESCE(ROUND(AVG(o.price_change_pct), 2), 0.0) AS avg_change
+            FROM predictions p
+            JOIN outcomes o ON p.id = o.prediction_id
+            WHERE p.status = 'COMPLETED'
+            GROUP BY p.symbol
+            ORDER BY total DESC
+        """)
+        by_symbol = cursor.fetchall()
+        return overall, by_symbol
+    finally:
+        conn.close()
+
+def format_performance_report():
+    """Telegram için performans raporu metnini hazırlar."""
+    overall, by_symbol = get_performance_summary()
+    total, hits, win_rate, avg_change = overall
+    
+    if not total or total == 0:
+        return "📊 *Ajan Performans Raporu*\n\nHenüz tamamlanmış bir tahmin verisi bulunmuyor."
+    
+    msg = f"📊 *Ajan Tahmin Performans Raporu*\n\n"
+    msg += f"🎯 *Genel Win-Rate:* %{win_rate:.2f}\n"
+    msg += f"📈 *Başarılı / Toplam:* {hits}/{total}\n"
+    msg += f"💰 *Ortalama Fiyat Değişimi:* %{avg_change:+.2f}\n\n"
+    msg += "🔍 *Varlık Bazlı Detaylar:*\n"
+    
+    for symbol, s_total, s_hits, s_win_rate, s_change in by_symbol:
+        msg += f"• *{symbol}*: %{s_win_rate:.1f} Win-Rate ({s_hits}/{s_total}) | Ort: %{s_change:+.2f}\n"
+        
+    return msg

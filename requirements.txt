@@ -4,3 +4,4 @@ python-dotenv
 requests
 schedule
 ccxt
+python-telegram-bot
